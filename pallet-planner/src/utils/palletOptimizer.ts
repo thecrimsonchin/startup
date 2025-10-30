@@ -177,8 +177,6 @@ export class PalletOptimizer {
     });
 
     for (const item of sortedItems) {
-      let placedCount = 0;
-
       for (let i = 0; i < item.quantity; i++) {
         const position = this.findBestPosition(
           grid,
@@ -199,7 +197,6 @@ export class PalletOptimizer {
 
           placedItems.push(placed);
           totalWeight += item.sku.weight;
-          placedCount++;
 
           // Mark grid as occupied
           this.markGridOccupied(
