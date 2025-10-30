@@ -21,7 +21,7 @@ export class ExportUtils {
   }
 
   exportPDF(): void {
-    const doc = new jsPDF() as any;
+    const doc = new jsPDF() as jsPDF & { lastAutoTable?: { finalY: number } };
     const pageWidth = doc.internal.pageSize.getWidth();
     let yPos = 20;
 
@@ -98,7 +98,7 @@ export class ExportUtils {
       styles: { fontSize: 9 }
     });
 
-    yPos = (doc as any).lastAutoTable.finalY + 10;
+    yPos = (doc.lastAutoTable?.finalY ?? yPos) + 10;
 
     // Grand Total
     doc.setFontSize(12);
