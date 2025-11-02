@@ -1,6 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Download, Package } from 'lucide-react';
-import type { Order, OrderItem, Company, Customer, SKU, PackingResult, WeightUnit } from '../types';
+import type {
+  Order,
+  OrderItem,
+  Company,
+  Customer,
+  SKU,
+  PackingResult,
+  WeightUnit,
+  Pallet
+} from '../types';
 import { StorageManager } from '../utils/storage';
 import { PalletOptimizer } from '../utils/palletOptimizer';
 import { ExportUtils } from '../utils/exportUtils';
@@ -102,10 +111,20 @@ export const PalletPlanner: React.FC = () => {
     const optimizer = new PalletOptimizer(
       { length: palletLength, width: palletWidth },
       maxHeight,
-      maxWeight
+      maxWeight,
+      weightUnit
     );
 
-    const pallets = optimizer.optimize(orderItems);
+    let pallets: Pallet[];
+
+    try {
+      pallets = optimizer.optimize(orderItems);
+    } catch (error) {
+      console.error(error);
+      const message = error instanceof Error ? error.message : 'Failed to optimize pallet plan. Please review your inputs.';
+      alert(message);
+      return;
+    }
     
     const totalWeight = pallets.reduce((sum, p) => sum + p.totalWeight, 0);
     const totalHeight = pallets.reduce((sum, p) => sum + p.totalHeight, 0);
@@ -311,7 +330,7 @@ export const PalletPlanner: React.FC = () => {
                 <option value="">Choose SKU</option>
                 {skus.map(sku => (
                   <option key={sku.id} value={sku.id}>
-                    {sku.name} ({sku.length}"×{sku.width}"×{sku.height}")
+                    {sku.name} ({sku.length}"?{sku.width}"?{sku.height}")
                   </option>
                 ))}
               </select>
@@ -372,7 +391,7 @@ export const PalletPlanner: React.FC = () => {
                     <tr key={index}>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.sku.name}</td>
                       <td className="px-6 py-4 text-sm text-gray-900">
-                        {item.sku.length}" × {item.sku.width}" × {item.sku.height}"
+                        {item.sku.length}" ? {item.sku.width}" ? {item.sku.height}"
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.sku.weight} lbs</td>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.quantity}</td>
