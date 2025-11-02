@@ -49,6 +49,8 @@ export interface OrderItem {
   sku: SKU;
   quantity: number;
   unitType: UnitType;
+  unitPrice?: number;
+  totalPrice?: number;
 }
 
 export interface PalletSize {
