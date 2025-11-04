@@ -1,10 +1,76 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, Trash2, Download, Package } from 'lucide-react';
-import type { Order, OrderItem, Company, Customer, SKU, PackingResult, WeightUnit } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { Plus, Trash2, Download, Package, Upload } from 'lucide-react';
+import type {
+  Order,
+  OrderItem,
+  Company,
+  Customer,
+  SKU,
+  PackingResult,
+  WeightUnit,
+  Pallet
+} from '../types';
 import { StorageManager } from '../utils/storage';
 import { PalletOptimizer } from '../utils/palletOptimizer';
 import { ExportUtils } from '../utils/exportUtils';
 import { PalletVisualization } from './PalletVisualization';
+import {
+  parseSalesOrderCSV,
+  type ParsedSalesOrder,
+  type ParsedSalesOrderItem,
+  type ParsedSalesOrderParty
+} from '../utils/salesOrderParser';
+
+interface MissingSkuContext {
+  parsedItem: ParsedSalesOrderItem;
+}
+
+interface MissingSkuFormState {
+  id: string;
+  name: string;
+  length: string;
+  width: string;
+  height: string;
+  weight: string;
+  packType: string;
+  description: string;
+}
+
+const createEmptyMissingSkuForm = (): MissingSkuFormState => ({
+  id: '',
+  name: '',
+  length: '',
+  width: '',
+  height: '',
+  weight: '',
+  packType: '',
+  description: ''
+});
+
+interface SkuFormState {
+  id: string;
+  name: string;
+  length: string;
+  width: string;
+  height: string;
+  weight: string;
+  packType: string;
+  description: string;
+}
+
+const createEmptySkuForm = (): SkuFormState => ({
+  id: '',
+  name: '',
+  length: '',
+  width: '',
+  height: '',
+  weight: '',
+  packType: '',
+  description: ''
+});
+
+const sortSkus = (list: SKU[]): SKU[] =>
+  [...list].sort((a, b) => a.name.localeCompare(b.name));
 
 export const PalletPlanner: React.FC = () => {
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -26,18 +92,578 @@ export const PalletPlanner: React.FC = () => {
   const [maxHeight, setMaxHeight] = useState<number>(72);
   const [maxWeight, setMaxWeight] = useState<number>(2000);
   const [weightUnit, setWeightUnit] = useState<WeightUnit>('lbs');
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isProcessingUpload, setIsProcessingUpload] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [missingSkuQueue, setMissingSkuQueue] = useState<MissingSkuContext[]>([]);
+  const [activeMissingSku, setActiveMissingSku] = useState<MissingSkuContext | null>(null);
+  const [isMissingSkuModalOpen, setIsMissingSkuModalOpen] = useState(false);
+  const [missingSkuForm, setMissingSkuForm] = useState<MissingSkuFormState>(createEmptyMissingSkuForm());
+  const [isSkuModalOpen, setIsSkuModalOpen] = useState(false);
+  const [skuForm, setSkuForm] = useState<SkuFormState>(createEmptySkuForm());
+  const [editingSku, setEditingSku] = useState<SKU | null>(null);
+  const [skuFormError, setSkuFormError] = useState<string | null>(null);
   
   const [packingResult, setPackingResult] = useState<PackingResult | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
 
-  useEffect(() => {
-    loadData();
-  }, []);
+  const hasPricing = orderItems.some(item => item.unitPrice !== undefined);
+  const orderValue = hasPricing
+    ? orderItems.reduce((sum, item) => sum + (item.totalPrice ?? ((item.unitPrice ?? 0) * item.quantity)), 0)
+    : 0;
+  const hasPendingMissingSkus = Boolean(activeMissingSku || missingSkuQueue.length > 0);
 
-  const loadData = () => {
-    setCompanies(StorageManager.getCompanies());
-    setCustomers(StorageManager.getCustomers());
-    setSKUs(StorageManager.getSKUs());
+    useEffect(() => {
+      loadData();
+    }, []);
+
+    const loadData = () => {
+      setCompanies(StorageManager.getCompanies());
+      setCustomers(StorageManager.getCustomers());
+      setSKUs(sortSkus(StorageManager.getSKUs()));
+    };
+
+    const resetMissingSkuState = () => {
+      setMissingSkuQueue([]);
+      setActiveMissingSku(null);
+      setIsMissingSkuModalOpen(false);
+      setMissingSkuForm(createEmptyMissingSkuForm());
+    };
+
+    const openSkuModal = (sku?: SKU) => {
+      if (sku) {
+        setEditingSku(sku);
+        setSkuForm({
+          id: sku.id,
+          name: sku.name,
+          length: String(sku.length),
+          width: String(sku.width),
+          height: String(sku.height),
+          weight: String(sku.weight),
+          packType: sku.packType,
+          description: sku.description ?? ''
+        });
+      } else {
+        setEditingSku(null);
+        setSkuForm(createEmptySkuForm());
+      }
+
+      setSkuFormError(null);
+      setIsSkuModalOpen(true);
+    };
+
+    const closeSkuModal = () => {
+      setIsSkuModalOpen(false);
+      setEditingSku(null);
+      setSkuForm(createEmptySkuForm());
+      setSkuFormError(null);
+    };
+
+    const handleSkuFormChange = (field: keyof SkuFormState, value: string) => {
+      setSkuForm(prev => ({ ...prev, [field]: value }));
+    };
+
+    const handleSkuFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      const trimmedName = skuForm.name.trim();
+      const trimmedPackType = skuForm.packType.trim();
+      const length = Number(skuForm.length);
+      const width = Number(skuForm.width);
+      const height = Number(skuForm.height);
+      const weight = Number(skuForm.weight);
+
+      if (!trimmedName) {
+        setSkuFormError('SKU name is required.');
+        return;
+      }
+
+      if (!trimmedPackType) {
+        setSkuFormError('Pack type is required.');
+        return;
+      }
+
+      if (
+        !Number.isFinite(length) ||
+        !Number.isFinite(width) ||
+        !Number.isFinite(height) ||
+        !Number.isFinite(weight) ||
+        length <= 0 ||
+        width <= 0 ||
+        height <= 0 ||
+        weight <= 0
+      ) {
+        setSkuFormError('Please enter positive numeric values for length, width, height, and weight.');
+        return;
+      }
+
+      const previousIdRaw = editingSku?.id ?? null;
+      const previousIdNormalized = previousIdRaw?.trim().toLowerCase() ?? null;
+      const requestedId = skuForm.id.trim();
+      let finalSkuId = requestedId || previousIdRaw?.trim() || '';
+
+      if (!finalSkuId) {
+        finalSkuId = `SKU-${Date.now()}`;
+      }
+
+      const normalizedId = finalSkuId.trim().toLowerCase();
+      const conflictingSku = skus.find(existing => {
+        const existingId = existing.id.trim().toLowerCase();
+        if (previousIdNormalized && existingId === previousIdNormalized) {
+          return false;
+        }
+        return existingId === normalizedId;
+      });
+
+      if (conflictingSku) {
+        setSkuFormError('Another SKU already uses this ID. Please choose a different ID.');
+        return;
+      }
+
+      if (previousIdNormalized && previousIdNormalized !== normalizedId) {
+        StorageManager.deleteSKU(previousIdRaw!);
+      }
+
+      const updatedSku: SKU = {
+        id: finalSkuId.trim(),
+        name: trimmedName,
+        length,
+        width,
+        height,
+        weight,
+        packType: trimmedPackType,
+        description: skuForm.description.trim()
+      };
+
+      StorageManager.saveSKU(updatedSku);
+
+      setSKUs(prev => {
+        const filtered = prev.filter(existing => {
+          const existingId = existing.id.trim().toLowerCase();
+          if (existingId === normalizedId) {
+            return false;
+          }
+          if (previousIdNormalized && existingId === previousIdNormalized) {
+            return false;
+          }
+          return true;
+        });
+        return sortSkus([...filtered, updatedSku]);
+      });
+
+      setOrderItems(prev =>
+        prev.map(item => {
+          if (item.sku.id.trim().toLowerCase() === normalizedId) {
+            return { ...item, sku: updatedSku };
+          }
+
+          if (previousIdNormalized && item.sku.id.trim().toLowerCase() === previousIdNormalized) {
+            return { ...item, sku: updatedSku };
+          }
+          return item;
+        })
+      );
+
+      setSelectedSKU(prev => {
+        if (!editingSku) {
+          return updatedSku.id;
+        }
+
+        if (prev.trim().toLowerCase() === normalizedId) {
+          return updatedSku.id;
+        }
+
+        if (previousIdNormalized && prev.trim().toLowerCase() === previousIdNormalized) {
+          return updatedSku.id;
+        }
+
+        return prev;
+      });
+
+      setPackingResult(null);
+      setOrder(null);
+
+      closeSkuModal();
+    };
+
+    const openMissingSkuModal = (
+    context: MissingSkuContext | null,
+    remainingQueue: MissingSkuContext[]
+  ) => {
+    if (!context) {
+      resetMissingSkuState();
+      return;
+    }
+
+    setActiveMissingSku(context);
+    setMissingSkuQueue(remainingQueue);
+    setMissingSkuForm({
+      id: context.parsedItem.skuId,
+      name: context.parsedItem.skuName ?? context.parsedItem.skuId,
+      length:
+        context.parsedItem.length !== undefined
+          ? String(context.parsedItem.length)
+          : '',
+      width:
+        context.parsedItem.width !== undefined
+          ? String(context.parsedItem.width)
+          : '',
+      height:
+        context.parsedItem.height !== undefined
+          ? String(context.parsedItem.height)
+          : '',
+      weight:
+        context.parsedItem.unitWeight !== undefined
+          ? String(context.parsedItem.unitWeight)
+          : '',
+      packType: context.parsedItem.packType ?? '',
+      description: context.parsedItem.description ?? ''
+    });
+    setIsMissingSkuModalOpen(true);
+  };
+
+  const normalizeDateForInput = (value: string): string | null => {
+    if (!value) return null;
+    const trimmed = value.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return trimmed;
+    }
+
+    const matched = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (matched) {
+      const [, month, day, year] = matched;
+      return `${year}-${String(Number(month)).padStart(2, '0')}-${String(Number(day)).padStart(2, '0')}`;
+    }
+
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      const month = String(parsed.getMonth() + 1).padStart(2, '0');
+      const day = String(parsed.getDate()).padStart(2, '0');
+      const year = parsed.getFullYear();
+      return `${year}-${month}-${day}`;
+    }
+
+    return null;
+  };
+
+  const findOrCreateCompanyFromParsed = (party: ParsedSalesOrderParty): Company => {
+    const normalizedName = party.name.trim().toLowerCase();
+    const existing = companies.find(
+      company => company.name.trim().toLowerCase() === normalizedName
+    );
+
+    if (existing) {
+      return existing;
+    }
+
+    const company: Company = {
+      id: `COMP-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: party.name,
+      address: party.address,
+      city: party.city,
+      state: party.state,
+      zip: party.zip,
+      phone: party.phone,
+      email: party.email
+    };
+
+    StorageManager.saveCompany(company);
+    setCompanies(prev => [...prev, company]);
+
+    return company;
+  };
+
+  const findOrCreateCustomerFromParsed = (party: ParsedSalesOrderParty): Customer => {
+    const normalizedName = party.name.trim().toLowerCase();
+    const existing = customers.find(
+      customer => customer.name.trim().toLowerCase() === normalizedName
+    );
+
+    if (existing) {
+      return existing;
+    }
+
+    const customer: Customer = {
+      id: `CUST-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: party.name,
+      address: party.address,
+      city: party.city,
+      state: party.state,
+      zip: party.zip,
+      phone: party.phone,
+      email: party.email
+    };
+
+    StorageManager.saveCustomer(customer);
+    setCustomers(prev => [...prev, customer]);
+
+    return customer;
+  };
+
+  const findExistingSku = (parsedItem: ParsedSalesOrderItem): SKU | undefined => {
+    const normalizedId = parsedItem.skuId.trim().toLowerCase();
+    let sku = skus.find(item => item.id.trim().toLowerCase() === normalizedId);
+
+    if (!sku && parsedItem.skuName) {
+      const normalizedName = parsedItem.skuName.trim().toLowerCase();
+      sku = skus.find(item => item.name.trim().toLowerCase() === normalizedName);
+    }
+
+    return sku;
+  };
+
+  const buildOrderItemsFromParsed = (
+    parsedItems: ParsedSalesOrderItem[]
+  ): { items: OrderItem[]; missing: MissingSkuContext[] } => {
+    type AggregatedItem = {
+      sku: SKU;
+      unitType: OrderItem['unitType'];
+      quantity: number;
+      unitPrice?: number;
+      pricingSum: number;
+    };
+
+    const aggregatedMap = new Map<string, AggregatedItem>();
+    const missingMap = new Map<string, MissingSkuContext>();
+
+    parsedItems.forEach(parsedItem => {
+      const existingSku = findExistingSku(parsedItem);
+      const baseKey = parsedItem.skuId.trim().toLowerCase();
+
+      if (existingSku) {
+        const aggregateKey = `${existingSku.id.toLowerCase()}::${parsedItem.unitType}`;
+        const contribution =
+          parsedItem.unitPrice !== undefined
+            ? parsedItem.unitPrice * parsedItem.quantity
+            : 0;
+
+        if (aggregatedMap.has(aggregateKey)) {
+          const aggregate = aggregatedMap.get(aggregateKey)!;
+          aggregate.quantity += parsedItem.quantity;
+
+          if (parsedItem.unitPrice !== undefined) {
+            aggregate.unitPrice = parsedItem.unitPrice;
+            aggregate.pricingSum += contribution;
+          }
+        } else {
+          aggregatedMap.set(aggregateKey, {
+            sku: existingSku,
+            unitType: parsedItem.unitType,
+            quantity: parsedItem.quantity,
+            unitPrice: parsedItem.unitPrice,
+            pricingSum: contribution
+          });
+        }
+      } else {
+        const missingKey = `${baseKey}::${parsedItem.unitType}`;
+        const existingMissing = missingMap.get(missingKey);
+
+        if (existingMissing) {
+          existingMissing.parsedItem.quantity += parsedItem.quantity;
+
+          if (parsedItem.unitPrice !== undefined) {
+            existingMissing.parsedItem.unitPrice = parsedItem.unitPrice;
+          }
+
+          if (parsedItem.unitWeight !== undefined) {
+            existingMissing.parsedItem.unitWeight = parsedItem.unitWeight;
+          }
+
+          if (existingMissing.parsedItem.length === undefined && parsedItem.length !== undefined) {
+            existingMissing.parsedItem.length = parsedItem.length;
+          }
+
+          if (existingMissing.parsedItem.width === undefined && parsedItem.width !== undefined) {
+            existingMissing.parsedItem.width = parsedItem.width;
+          }
+
+          if (existingMissing.parsedItem.height === undefined && parsedItem.height !== undefined) {
+            existingMissing.parsedItem.height = parsedItem.height;
+          }
+
+          if (!existingMissing.parsedItem.packType && parsedItem.packType) {
+            existingMissing.parsedItem.packType = parsedItem.packType;
+          }
+
+          if (!existingMissing.parsedItem.description && parsedItem.description) {
+            existingMissing.parsedItem.description = parsedItem.description;
+          }
+
+          if (!existingMissing.parsedItem.skuName && parsedItem.skuName) {
+            existingMissing.parsedItem.skuName = parsedItem.skuName;
+          }
+        } else {
+          missingMap.set(missingKey, {
+            parsedItem: { ...parsedItem }
+          });
+        }
+      }
+    });
+
+    const items: OrderItem[] = Array.from(aggregatedMap.values()).map(aggregate => ({
+      sku: aggregate.sku,
+      quantity: aggregate.quantity,
+      unitType: aggregate.unitType,
+      unitPrice: aggregate.unitPrice,
+      totalPrice:
+        aggregate.pricingSum > 0
+          ? aggregate.pricingSum
+          : aggregate.unitPrice !== undefined
+            ? aggregate.unitPrice * aggregate.quantity
+            : undefined
+    }));
+
+    const missing = Array.from(missingMap.values());
+
+    return { items, missing };
+  };
+
+  const applyParsedSalesOrder = (parsed: ParsedSalesOrder) => {
+    setPackingResult(null);
+    setOrder(null);
+
+    const company = findOrCreateCompanyFromParsed(parsed.from);
+    setSelectedCompany(company);
+
+    const customer = findOrCreateCustomerFromParsed(parsed.to);
+    setSelectedCustomer(customer);
+
+    if (parsed.poNumber) {
+      setPONumber(parsed.poNumber);
+    }
+
+    if (parsed.orderDate) {
+      const normalizedDate = normalizeDateForInput(parsed.orderDate);
+      if (normalizedDate) {
+        setOrderDate(normalizedDate);
+      }
+    }
+
+    const { items, missing } = buildOrderItemsFromParsed(parsed.items);
+    setOrderItems(items);
+
+    if (missing.length > 0) {
+      const [first, ...rest] = missing;
+      openMissingSkuModal(first, rest);
+      setUploadError('Some SKUs were not found. Please provide details to add them to the library.');
+    } else {
+      resetMissingSkuState();
+      setUploadError(null);
+    }
+  };
+
+  const handleSalesOrderUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    setUploadError(null);
+    setIsProcessingUpload(true);
+
+    try {
+      const content = await file.text();
+      const parsed = parseSalesOrderCSV(content);
+      applyParsedSalesOrder(parsed);
+    } catch (error) {
+      console.error(error);
+      setUploadError(
+        error instanceof Error
+          ? error.message
+          : 'Failed to parse the uploaded sales order. Please verify the file format.'
+      );
+      resetMissingSkuState();
+    } finally {
+      setIsProcessingUpload(false);
+      event.target.value = '';
+    }
+  };
+
+  const triggerSalesOrderUpload = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleMissingSkuChange = (field: keyof MissingSkuFormState, value: string) => {
+    setMissingSkuForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleMissingSkuSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!activeMissingSku) {
+      return;
+    }
+
+    const length = Number(missingSkuForm.length);
+    const width = Number(missingSkuForm.width);
+    const height = Number(missingSkuForm.height);
+    const weight = Number(missingSkuForm.weight);
+    const packType = missingSkuForm.packType.trim();
+
+    if (
+      !Number.isFinite(length) ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      !Number.isFinite(weight) ||
+      length <= 0 ||
+      width <= 0 ||
+      height <= 0 ||
+      weight <= 0
+    ) {
+      alert('Please provide positive numeric values for length, width, height, and weight.');
+      return;
+    }
+
+    if (!packType) {
+      alert('Pack type is required.');
+      return;
+    }
+
+    const skuId = (missingSkuForm.id || activeMissingSku.parsedItem.skuId).trim();
+    const skuName =
+      missingSkuForm.name.trim() ||
+      activeMissingSku.parsedItem.skuName ||
+      skuId;
+
+    const newSku: SKU = {
+      id: skuId,
+      name: skuName,
+      length,
+      width,
+      height,
+      weight,
+      packType,
+      description: missingSkuForm.description.trim() || activeMissingSku.parsedItem.description || ''
+    };
+
+    StorageManager.saveSKU(newSku);
+      setSKUs(prev => {
+        const filtered = prev.filter(sku => sku.id.trim().toLowerCase() !== newSku.id.trim().toLowerCase());
+        return sortSkus([...filtered, newSku]);
+      });
+
+    setOrderItems(prev => {
+      const updated = [...prev];
+      updated.push({
+        sku: newSku,
+        quantity: activeMissingSku.parsedItem.quantity,
+        unitType: activeMissingSku.parsedItem.unitType,
+        unitPrice: activeMissingSku.parsedItem.unitPrice,
+        totalPrice:
+          activeMissingSku.parsedItem.unitPrice !== undefined
+            ? activeMissingSku.parsedItem.unitPrice * activeMissingSku.parsedItem.quantity
+            : undefined
+      });
+      return updated;
+    });
+
+    if (missingSkuQueue.length > 0) {
+      const [next, ...rest] = missingSkuQueue;
+      openMissingSkuModal(next, rest);
+    } else {
+      resetMissingSkuState();
+      setUploadError(null);
+    }
   };
 
   const formatDateToMMDDYYYY = (dateStr: string): string => {
@@ -80,6 +706,11 @@ export const PalletPlanner: React.FC = () => {
       return;
     }
 
+    if (hasPendingMissingSkus) {
+      alert('Please complete the missing SKU details before calculating the pallet plan.');
+      return;
+    }
+
     const currentOrder: Order = {
       poNumber,
       date: formatDateToMMDDYYYY(orderDate),
@@ -102,10 +733,20 @@ export const PalletPlanner: React.FC = () => {
     const optimizer = new PalletOptimizer(
       { length: palletLength, width: palletWidth },
       maxHeight,
-      maxWeight
+      maxWeight,
+      weightUnit
     );
 
-    const pallets = optimizer.optimize(orderItems);
+    let pallets: Pallet[];
+
+    try {
+      pallets = optimizer.optimize(orderItems);
+    } catch (error) {
+      console.error(error);
+      const message = error instanceof Error ? error.message : 'Failed to optimize pallet plan. Please review your inputs.';
+      alert(message);
+      return;
+    }
     
     const totalWeight = pallets.reduce((sum, p) => sum + p.totalWeight, 0);
     const totalHeight = pallets.reduce((sum, p) => sum + p.totalHeight, 0);
@@ -154,10 +795,21 @@ export const PalletPlanner: React.FC = () => {
     setOrderItems([]);
     setPackingResult(null);
     setOrder(null);
+    closeSkuModal();
+    resetMissingSkuState();
+    setUploadError(null);
   };
 
   return (
     <div className="space-y-8">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv"
+        onChange={handleSalesOrderUpload}
+        className="hidden"
+      />
+
       <div className="bg-white rounded-lg shadow-md p-6">
         <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
           <Package size={28} />
@@ -295,6 +947,34 @@ export const PalletPlanner: React.FC = () => {
           </div>
         </div>
 
+        {/* Sales Order Upload */}
+        <div className="border-t pt-6 mb-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-4">Sales Order Upload</h3>
+          {uploadError && (
+            <div className="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+              {uploadError}
+            </div>
+          )}
+          {hasPendingMissingSkus && !activeMissingSku && (
+            <div className="mb-4 rounded-md bg-yellow-50 border border-yellow-200 px-4 py-3 text-sm text-yellow-800">
+              Complete the missing SKU details to finish importing this sales order.
+            </div>
+          )}
+          <div className="flex flex-col md:flex-row md:items-center gap-4">
+            <button
+              onClick={triggerSalesOrderUpload}
+              disabled={isProcessingUpload}
+              className={`flex items-center gap-2 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-2 px-4 rounded-lg transition ${isProcessingUpload ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              <Upload size={20} />
+              {isProcessingUpload ? 'Processing...' : 'Upload Sales Order CSV'}
+            </button>
+            <p className="text-sm text-gray-600">
+              Required columns: from_* and to_* address fields, sku, quantity, optional unit_price, unit_type, length, width, height, pack_type.
+            </p>
+          </div>
+        </div>
+
         {/* Add Items */}
         <div className="border-t pt-6 mb-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">Add Items</h3>
@@ -311,10 +991,32 @@ export const PalletPlanner: React.FC = () => {
                 <option value="">Choose SKU</option>
                 {skus.map(sku => (
                   <option key={sku.id} value={sku.id}>
-                    {sku.name} ({sku.length}"×{sku.width}"×{sku.height}")
+                    {sku.name} ({sku.length}" x {sku.width}" x {sku.height}")
                   </option>
                 ))}
               </select>
+              <div className="flex flex-wrap gap-2 mt-3">
+                <button
+                  type="button"
+                  onClick={() => openSkuModal()}
+                  className="px-3 py-2 text-sm font-semibold bg-white border border-yellow-500 text-yellow-600 rounded-md hover:bg-yellow-50 transition"
+                >
+                  Add SKU
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sku = skus.find(s => s.id === selectedSKU);
+                    if (sku) {
+                      openSkuModal(sku);
+                    }
+                  }}
+                  disabled={!selectedSKU}
+                  className={`px-3 py-2 text-sm font-semibold rounded-md border transition ${selectedSKU ? 'bg-white border-blue-500 text-blue-600 hover:bg-blue-50' : 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'}`}
+                >
+                  Edit Selected
+                </button>
+              </div>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -364,6 +1066,12 @@ export const PalletPlanner: React.FC = () => {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Weight</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Quantity</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Unit</th>
+                    {hasPricing && (
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Unit Price</th>
+                    )}
+                    {hasPricing && (
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Line Total</th>
+                    )}
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Actions</th>
                   </tr>
                 </thead>
@@ -372,11 +1080,23 @@ export const PalletPlanner: React.FC = () => {
                     <tr key={index}>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.sku.name}</td>
                       <td className="px-6 py-4 text-sm text-gray-900">
-                        {item.sku.length}" × {item.sku.width}" × {item.sku.height}"
+                        {item.sku.length}" x {item.sku.width}" x {item.sku.height}"
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.sku.weight} lbs</td>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.quantity}</td>
                       <td className="px-6 py-4 text-sm text-gray-900">{item.unitType}</td>
+                      {hasPricing && (
+                        <td className="px-6 py-4 text-sm text-gray-900">
+                          {item.unitPrice !== undefined ? `$${item.unitPrice.toFixed(2)}` : 'N/A'}
+                        </td>
+                      )}
+                      {hasPricing && (
+                        <td className="px-6 py-4 text-sm text-gray-900">
+                          {item.totalPrice !== undefined || item.unitPrice !== undefined
+                            ? `$${(item.totalPrice ?? (item.unitPrice ?? 0) * item.quantity).toFixed(2)}`
+                            : 'N/A'}
+                        </td>
+                      )}
                       <td className="px-6 py-4 text-sm">
                         <button
                           onClick={() => removeOrderItem(index)}
@@ -393,11 +1113,21 @@ export const PalletPlanner: React.FC = () => {
           </div>
         )}
 
+        {hasPricing && (
+          <div className="border-t pt-4 mb-6 flex justify-end">
+            <div className="text-right">
+              <div className="text-sm text-gray-600">Order Value</div>
+              <div className="text-2xl font-semibold text-gray-900">${orderValue.toFixed(2)}</div>
+            </div>
+          </div>
+        )}
+
         {/* Action Buttons */}
         <div className="flex gap-4">
           <button
             onClick={calculatePalletPlan}
-            className="flex-1 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-3 px-6 rounded-lg transition text-lg"
+            disabled={hasPendingMissingSkus}
+            className={`flex-1 bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-3 px-6 rounded-lg transition text-lg ${hasPendingMissingSkus ? 'opacity-60 cursor-not-allowed' : ''}`}
           >
             Calculate Pallet Plan
           </button>
@@ -515,6 +1245,280 @@ export const PalletPlanner: React.FC = () => {
               <PalletVisualization pallet={pallet} />
             </div>
           ))}
+        </div>
+      )}
+        {isSkuModalOpen && (
+          <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-2xl font-bold text-gray-900">
+                  {editingSku ? 'Edit SKU' : 'Add New SKU'}
+                </h3>
+                <button
+                  type="button"
+                  onClick={closeSkuModal}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  Close
+                </button>
+              </div>
+
+              {skuFormError && (
+                <div className="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+                  {skuFormError}
+                </div>
+              )}
+
+              <form onSubmit={handleSkuFormSubmit} className="space-y-5">
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      SKU ID {editingSku ? '(leave unchanged to keep current)' : '(optional)'}
+                    </label>
+                    <input
+                      type="text"
+                      value={skuForm.id}
+                      onChange={(e) => handleSkuFormChange('id', e.target.value)}
+                      placeholder={editingSku ? editingSku.id : 'Auto-generated if left blank'}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">SKU Name *</label>
+                    <input
+                      type="text"
+                      required
+                      value={skuForm.name}
+                      onChange={(e) => handleSkuFormChange('name', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Length (in) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.length}
+                      onChange={(e) => handleSkuFormChange('length', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Width (in) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.width}
+                      onChange={(e) => handleSkuFormChange('width', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Height (in) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.height}
+                      onChange={(e) => handleSkuFormChange('height', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Unit Weight *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.weight}
+                      onChange={(e) => handleSkuFormChange('weight', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Pack Type *</label>
+                    <input
+                      type="text"
+                      required
+                      value={skuForm.packType}
+                      onChange={(e) => handleSkuFormChange('packType', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <textarea
+                    value={skuForm.description}
+                    onChange={(e) => handleSkuFormChange('description', e.target.value)}
+                    rows={3}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                  />
+                </div>
+
+                <div className="flex flex-col sm:flex-row justify-end gap-3 pt-4">
+                  <button
+                    type="button"
+                    onClick={closeSkuModal}
+                    className="px-4 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-600 text-black font-semibold transition"
+                  >
+                    {editingSku ? 'Save Changes' : 'Add SKU'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {isMissingSkuModalOpen && activeMissingSku && (
+        <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
+            <h3 className="text-2xl font-bold text-gray-900 mb-2">Provide Missing SKU Details</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              SKU <span className="font-semibold">{activeMissingSku.parsedItem.skuId}</span> is not in your library. Enter the required details so it can be included in the pallet plan.
+            </p>
+
+            <div className="grid md:grid-cols-3 gap-4 mb-6 text-sm text-gray-700">
+              <div>
+                <span className="block text-gray-500">Quantity</span>
+                <span className="font-semibold">{activeMissingSku.parsedItem.quantity}</span>
+              </div>
+              <div>
+                <span className="block text-gray-500">Unit Type</span>
+                <span className="font-semibold capitalize">{activeMissingSku.parsedItem.unitType}</span>
+              </div>
+              <div>
+                <span className="block text-gray-500">Unit Price</span>
+                <span className="font-semibold">
+                  {activeMissingSku.parsedItem.unitPrice !== undefined
+                    ? `$${activeMissingSku.parsedItem.unitPrice.toFixed(2)}`
+                    : 'Not provided'}
+                </span>
+              </div>
+            </div>
+
+            <form onSubmit={handleMissingSkuSubmit} className="space-y-5">
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">SKU ID *</label>
+                  <input
+                    type="text"
+                    value={missingSkuForm.id}
+                    onChange={(e) => handleMissingSkuChange('id', e.target.value)}
+                    placeholder={activeMissingSku.parsedItem.skuId}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">SKU Name *</label>
+                  <input
+                    type="text"
+                    value={missingSkuForm.name}
+                    onChange={(e) => handleMissingSkuChange('name', e.target.value)}
+                    placeholder={activeMissingSku.parsedItem.skuName ?? 'SKU Name'}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Length (in) *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={missingSkuForm.length}
+                    onChange={(e) => handleMissingSkuChange('length', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Width (in) *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={missingSkuForm.width}
+                    onChange={(e) => handleMissingSkuChange('width', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Height (in) *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={missingSkuForm.height}
+                    onChange={(e) => handleMissingSkuChange('height', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Unit Weight (lbs) *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={missingSkuForm.weight}
+                    onChange={(e) => handleMissingSkuChange('weight', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Pack Type *</label>
+                  <input
+                    type="text"
+                    value={missingSkuForm.packType}
+                    onChange={(e) => handleMissingSkuChange('packType', e.target.value)}
+                    placeholder={activeMissingSku.parsedItem.packType ?? 'e.g., Case'}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <textarea
+                  value={missingSkuForm.description}
+                  onChange={(e) => handleMissingSkuChange('description', e.target.value)}
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                  placeholder={activeMissingSku.parsedItem.description ?? 'Optional notes'}
+                />
+              </div>
+
+              <div className="flex justify-end pt-4">
+                <button
+                  type="submit"
+                  className="bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-2 px-4 rounded-lg transition"
+                >
+                  Save SKU and Continue
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>
