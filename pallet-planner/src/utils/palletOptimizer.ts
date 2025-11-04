@@ -237,17 +237,11 @@ export class PalletOptimizer {
       return null;
     }
 
-    const perfectlyDivisible = candidates.filter(candidate => candidate.perfectlyDivisible);
-    if (perfectlyDivisible.length > 0) {
-      return this.pickBestCandidate(perfectlyDivisible);
-    }
-
-    const perfectFits = candidates.filter(candidate => candidate.perfectFit);
-    if (perfectFits.length > 0) {
-      return this.pickBestCandidate(perfectFits);
-    }
-
-    return this.pickBestCandidate(candidates);
+    return this.pickBestCandidate(
+      candidates,
+      maxHeightRemaining,
+      maxWeightRemainingBase
+    );
   }
 
   /**
@@ -378,25 +372,47 @@ export class PalletOptimizer {
     };
   }
 
-  /**
-   * Determine the most suitable candidate layer based on efficiency and waste.
-   */
-  private pickBestCandidate(candidates: LayerCandidate[]): LayerCandidate {
-    return [...candidates].sort((a, b) => {
-      if (Math.abs(a.efficiency - b.efficiency) > EPSILON) {
-        return b.efficiency - a.efficiency;
-      }
+    /**
+     * Determine the most suitable candidate layer using a composite efficiency, height, and weight score.
+     */
+    private pickBestCandidate(
+    candidates: LayerCandidate[],
+    maxHeightRemaining: number,
+    maxWeightRemainingBase: number
+  ): LayerCandidate {
+    const evaluated = candidates.map(candidate => ({
+      candidate,
+      score: this.computeCandidateScore(candidate, maxHeightRemaining, maxWeightRemainingBase)
+    }));
 
-      if (Math.abs(a.wasteVolume - b.wasteVolume) > EPSILON) {
-        return a.wasteVolume - b.wasteVolume;
-      }
+    evaluated.sort((a, b) => b.score - a.score);
 
-      if (Math.abs(a.layer.height - b.layer.height) > HEIGHT_TOLERANCE) {
-        return b.layer.height - a.layer.height;
-      }
+    return evaluated[0].candidate;
+  }
 
-      return b.weightBase - a.weightBase;
-    })[0];
+  private computeCandidateScore(
+    candidate: LayerCandidate,
+    maxHeightRemaining: number,
+    maxWeightRemainingBase: number
+  ): number {
+    const heightDenominator = Math.max(maxHeightRemaining, HEIGHT_TOLERANCE);
+    const weightDenominator = Math.max(maxWeightRemainingBase, EPSILON);
+    const volumeDenominator = this.palletArea * heightDenominator;
+
+    const heightFill = Math.min(1, candidate.layer.height / heightDenominator);
+    const weightFill = Math.min(1, candidate.weightBase / weightDenominator);
+    const areaFill = Math.min(1, candidate.efficiency);
+    const wastePenalty = volumeDenominator > EPSILON
+      ? candidate.wasteVolume / volumeDenominator
+      : 0;
+
+    const perfectBonus = candidate.perfectFit ? 0.05 : 0;
+    const divisibleBonus = candidate.perfectlyDivisible ? 0.05 : 0;
+
+    const baseScore = (areaFill * 0.4) + (heightFill * 0.35) + (weightFill * 0.2);
+    const adjustedScore = baseScore - (wastePenalty * 0.15) + perfectBonus + divisibleBonus;
+
+    return adjustedScore;
   }
 
   /**
