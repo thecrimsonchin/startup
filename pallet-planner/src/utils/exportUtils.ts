@@ -2,7 +2,13 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
-import type { Order, PackingResult, Pallet } from '../types';
+import type { Order, PackingResult, Pallet, SKU } from '../types';
+
+type JsPDFWithAutoTable = InstanceType<typeof jsPDF> & {
+  lastAutoTable?: {
+    finalY: number;
+  };
+};
 
 export class ExportUtils {
   private order: Order;
@@ -21,7 +27,7 @@ export class ExportUtils {
   }
 
   exportPDF(): void {
-    const doc = new jsPDF() as any;
+    const doc: JsPDFWithAutoTable = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     let yPos = 20;
 
@@ -98,7 +104,8 @@ export class ExportUtils {
       styles: { fontSize: 9 }
     });
 
-    yPos = (doc as any).lastAutoTable.finalY + 10;
+    const finalY = doc.lastAutoTable?.finalY ?? yPos;
+    yPos = finalY + 10;
 
     // Grand Total
     doc.setFontSize(12);
@@ -208,8 +215,8 @@ export class ExportUtils {
       }
     };
 
-    const blob = new Blob([JSON.stringify(data, null, 2)], { 
-      type: 'application/json;charset=utf-8' 
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: 'application/json;charset=utf-8'
     });
     saveAs(blob, this.getFilename('json'));
   }
@@ -347,7 +354,7 @@ export class ExportUtils {
     return skuList.join(', ');
   }
 
-  private findSKU(skuId: string) {
+  private findSKU(skuId: string): SKU | null {
     for (const item of this.order.items) {
       if (item.sku.id === skuId) {
         return item.sku;
