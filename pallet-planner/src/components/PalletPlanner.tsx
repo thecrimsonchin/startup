@@ -47,6 +47,31 @@ const createEmptyMissingSkuForm = (): MissingSkuFormState => ({
   description: ''
 });
 
+interface SkuFormState {
+  id: string;
+  name: string;
+  length: string;
+  width: string;
+  height: string;
+  weight: string;
+  packType: string;
+  description: string;
+}
+
+const createEmptySkuForm = (): SkuFormState => ({
+  id: '',
+  name: '',
+  length: '',
+  width: '',
+  height: '',
+  weight: '',
+  packType: '',
+  description: ''
+});
+
+const sortSkus = (list: SKU[]): SKU[] =>
+  [...list].sort((a, b) => a.name.localeCompare(b.name));
+
 export const PalletPlanner: React.FC = () => {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -74,6 +99,10 @@ export const PalletPlanner: React.FC = () => {
   const [activeMissingSku, setActiveMissingSku] = useState<MissingSkuContext | null>(null);
   const [isMissingSkuModalOpen, setIsMissingSkuModalOpen] = useState(false);
   const [missingSkuForm, setMissingSkuForm] = useState<MissingSkuFormState>(createEmptyMissingSkuForm());
+  const [isSkuModalOpen, setIsSkuModalOpen] = useState(false);
+  const [skuForm, setSkuForm] = useState<SkuFormState>(createEmptySkuForm());
+  const [editingSku, setEditingSku] = useState<SKU | null>(null);
+  const [skuFormError, setSkuFormError] = useState<string | null>(null);
   
   const [packingResult, setPackingResult] = useState<PackingResult | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
@@ -84,24 +113,180 @@ export const PalletPlanner: React.FC = () => {
     : 0;
   const hasPendingMissingSkus = Boolean(activeMissingSku || missingSkuQueue.length > 0);
 
-  useEffect(() => {
-    loadData();
-  }, []);
+    useEffect(() => {
+      loadData();
+    }, []);
 
-  const loadData = () => {
-    setCompanies(StorageManager.getCompanies());
-    setCustomers(StorageManager.getCustomers());
-    setSKUs(StorageManager.getSKUs());
-  };
+    const loadData = () => {
+      setCompanies(StorageManager.getCompanies());
+      setCustomers(StorageManager.getCustomers());
+      setSKUs(sortSkus(StorageManager.getSKUs()));
+    };
 
-  const resetMissingSkuState = () => {
-    setMissingSkuQueue([]);
-    setActiveMissingSku(null);
-    setIsMissingSkuModalOpen(false);
-    setMissingSkuForm(createEmptyMissingSkuForm());
-  };
+    const resetMissingSkuState = () => {
+      setMissingSkuQueue([]);
+      setActiveMissingSku(null);
+      setIsMissingSkuModalOpen(false);
+      setMissingSkuForm(createEmptyMissingSkuForm());
+    };
 
-  const openMissingSkuModal = (
+    const openSkuModal = (sku?: SKU) => {
+      if (sku) {
+        setEditingSku(sku);
+        setSkuForm({
+          id: sku.id,
+          name: sku.name,
+          length: String(sku.length),
+          width: String(sku.width),
+          height: String(sku.height),
+          weight: String(sku.weight),
+          packType: sku.packType,
+          description: sku.description ?? ''
+        });
+      } else {
+        setEditingSku(null);
+        setSkuForm(createEmptySkuForm());
+      }
+
+      setSkuFormError(null);
+      setIsSkuModalOpen(true);
+    };
+
+    const closeSkuModal = () => {
+      setIsSkuModalOpen(false);
+      setEditingSku(null);
+      setSkuForm(createEmptySkuForm());
+      setSkuFormError(null);
+    };
+
+    const handleSkuFormChange = (field: keyof SkuFormState, value: string) => {
+      setSkuForm(prev => ({ ...prev, [field]: value }));
+    };
+
+    const handleSkuFormSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      const trimmedName = skuForm.name.trim();
+      const trimmedPackType = skuForm.packType.trim();
+      const length = Number(skuForm.length);
+      const width = Number(skuForm.width);
+      const height = Number(skuForm.height);
+      const weight = Number(skuForm.weight);
+
+      if (!trimmedName) {
+        setSkuFormError('SKU name is required.');
+        return;
+      }
+
+      if (!trimmedPackType) {
+        setSkuFormError('Pack type is required.');
+        return;
+      }
+
+      if (
+        !Number.isFinite(length) ||
+        !Number.isFinite(width) ||
+        !Number.isFinite(height) ||
+        !Number.isFinite(weight) ||
+        length <= 0 ||
+        width <= 0 ||
+        height <= 0 ||
+        weight <= 0
+      ) {
+        setSkuFormError('Please enter positive numeric values for length, width, height, and weight.');
+        return;
+      }
+
+      const previousIdRaw = editingSku?.id ?? null;
+      const previousIdNormalized = previousIdRaw?.trim().toLowerCase() ?? null;
+      const requestedId = skuForm.id.trim();
+      let finalSkuId = requestedId || previousIdRaw?.trim() || '';
+
+      if (!finalSkuId) {
+        finalSkuId = `SKU-${Date.now()}`;
+      }
+
+      const normalizedId = finalSkuId.trim().toLowerCase();
+      const conflictingSku = skus.find(existing => {
+        const existingId = existing.id.trim().toLowerCase();
+        if (previousIdNormalized && existingId === previousIdNormalized) {
+          return false;
+        }
+        return existingId === normalizedId;
+      });
+
+      if (conflictingSku) {
+        setSkuFormError('Another SKU already uses this ID. Please choose a different ID.');
+        return;
+      }
+
+      if (previousIdNormalized && previousIdNormalized !== normalizedId) {
+        StorageManager.deleteSKU(previousIdRaw!);
+      }
+
+      const updatedSku: SKU = {
+        id: finalSkuId.trim(),
+        name: trimmedName,
+        length,
+        width,
+        height,
+        weight,
+        packType: trimmedPackType,
+        description: skuForm.description.trim()
+      };
+
+      StorageManager.saveSKU(updatedSku);
+
+      setSKUs(prev => {
+        const filtered = prev.filter(existing => {
+          const existingId = existing.id.trim().toLowerCase();
+          if (existingId === normalizedId) {
+            return false;
+          }
+          if (previousIdNormalized && existingId === previousIdNormalized) {
+            return false;
+          }
+          return true;
+        });
+        return sortSkus([...filtered, updatedSku]);
+      });
+
+      setOrderItems(prev =>
+        prev.map(item => {
+          if (item.sku.id.trim().toLowerCase() === normalizedId) {
+            return { ...item, sku: updatedSku };
+          }
+
+          if (previousIdNormalized && item.sku.id.trim().toLowerCase() === previousIdNormalized) {
+            return { ...item, sku: updatedSku };
+          }
+          return item;
+        })
+      );
+
+      setSelectedSKU(prev => {
+        if (!editingSku) {
+          return updatedSku.id;
+        }
+
+        if (prev.trim().toLowerCase() === normalizedId) {
+          return updatedSku.id;
+        }
+
+        if (previousIdNormalized && prev.trim().toLowerCase() === previousIdNormalized) {
+          return updatedSku.id;
+        }
+
+        return prev;
+      });
+
+      setPackingResult(null);
+      setOrder(null);
+
+      closeSkuModal();
+    };
+
+    const openMissingSkuModal = (
     context: MissingSkuContext | null,
     remainingQueue: MissingSkuContext[]
   ) => {
@@ -452,10 +637,10 @@ export const PalletPlanner: React.FC = () => {
     };
 
     StorageManager.saveSKU(newSku);
-    setSKUs(prev => {
-      const filtered = prev.filter(sku => sku.id.trim().toLowerCase() !== newSku.id.trim().toLowerCase());
-      return [...filtered, newSku];
-    });
+      setSKUs(prev => {
+        const filtered = prev.filter(sku => sku.id.trim().toLowerCase() !== newSku.id.trim().toLowerCase());
+        return sortSkus([...filtered, newSku]);
+      });
 
     setOrderItems(prev => {
       const updated = [...prev];
@@ -610,6 +795,7 @@ export const PalletPlanner: React.FC = () => {
     setOrderItems([]);
     setPackingResult(null);
     setOrder(null);
+    closeSkuModal();
     resetMissingSkuState();
     setUploadError(null);
   };
@@ -809,6 +995,28 @@ export const PalletPlanner: React.FC = () => {
                   </option>
                 ))}
               </select>
+              <div className="flex flex-wrap gap-2 mt-3">
+                <button
+                  type="button"
+                  onClick={() => openSkuModal()}
+                  className="px-3 py-2 text-sm font-semibold bg-white border border-yellow-500 text-yellow-600 rounded-md hover:bg-yellow-50 transition"
+                >
+                  Add SKU
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sku = skus.find(s => s.id === selectedSKU);
+                    if (sku) {
+                      openSkuModal(sku);
+                    }
+                  }}
+                  disabled={!selectedSKU}
+                  className={`px-3 py-2 text-sm font-semibold rounded-md border transition ${selectedSKU ? 'bg-white border-blue-500 text-blue-600 hover:bg-blue-50' : 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'}`}
+                >
+                  Edit Selected
+                </button>
+              </div>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1039,7 +1247,145 @@ export const PalletPlanner: React.FC = () => {
           ))}
         </div>
       )}
-      {isMissingSkuModalOpen && activeMissingSku && (
+        {isSkuModalOpen && (
+          <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-2xl font-bold text-gray-900">
+                  {editingSku ? 'Edit SKU' : 'Add New SKU'}
+                </h3>
+                <button
+                  type="button"
+                  onClick={closeSkuModal}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  Close
+                </button>
+              </div>
+
+              {skuFormError && (
+                <div className="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+                  {skuFormError}
+                </div>
+              )}
+
+              <form onSubmit={handleSkuFormSubmit} className="space-y-5">
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      SKU ID {editingSku ? '(leave unchanged to keep current)' : '(optional)'}
+                    </label>
+                    <input
+                      type="text"
+                      value={skuForm.id}
+                      onChange={(e) => handleSkuFormChange('id', e.target.value)}
+                      placeholder={editingSku ? editingSku.id : 'Auto-generated if left blank'}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">SKU Name *</label>
+                    <input
+                      type="text"
+                      required
+                      value={skuForm.name}
+                      onChange={(e) => handleSkuFormChange('name', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Length (in) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.length}
+                      onChange={(e) => handleSkuFormChange('length', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Width (in) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.width}
+                      onChange={(e) => handleSkuFormChange('width', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Height (in) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.height}
+                      onChange={(e) => handleSkuFormChange('height', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Unit Weight *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      required
+                      value={skuForm.weight}
+                      onChange={(e) => handleSkuFormChange('weight', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Pack Type *</label>
+                    <input
+                      type="text"
+                      required
+                      value={skuForm.packType}
+                      onChange={(e) => handleSkuFormChange('packType', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                  <textarea
+                    value={skuForm.description}
+                    onChange={(e) => handleSkuFormChange('description', e.target.value)}
+                    rows={3}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                  />
+                </div>
+
+                <div className="flex flex-col sm:flex-row justify-end gap-3 pt-4">
+                  <button
+                    type="button"
+                    onClick={closeSkuModal}
+                    className="px-4 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-800 font-semibold transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-600 text-black font-semibold transition"
+                  >
+                    {editingSku ? 'Save Changes' : 'Add SKU'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {isMissingSkuModalOpen && activeMissingSku && (
         <div className="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
             <h3 className="text-2xl font-bold text-gray-900 mb-2">Provide Missing SKU Details</h3>
